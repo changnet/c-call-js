@@ -141,8 +141,6 @@ g++ -I. -Iinclude samples/hello-world.cc -o hello_world -fno-rtti -fuse-ld=lld -
 
 v8没有在win下编译的文档，可参考chrome:https://chromium.googlesource.com/chromium/src/+/master/docs/windows_build_instructions.md#Setting-up-Windows
 
-
-
 * 先安装python3 git Visual Studio LLVM
 我的项目需要LLVM编译，你如果不用就不需要安装
 
@@ -215,10 +213,15 @@ foreach ($dir in $directories) {
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN=0
 ```
 
+* 设置WINDOWSSDKDIR
+```powershell
+$env:WINDOWSSDKDIR='D:\Windows Kits\10\'
+```
+
 * 同步依赖(这一步必须得执行，linux复制过来的可以减少下载，但得重新同步win相关的)
 gclient sync
 
-# 手动创建编译目录
+* 手动创建编译目录
 mkdir -p out.gn/x64.release
 
 * 手动创建out.gn/x64.release/args.gn，写入以下内容
@@ -250,7 +253,7 @@ symbol_level = 0
 v8_symbol_level = 0
 symbol_level = 0
 ```
-编译为200M
+编译出的Lib库为200M
 
 * 手动修改配置文件
 1. 修改v8\build\toolchain\win\setup_toolchain.py中的SDK_VERSION为自己安装的版本，比如'10.0.22621.0'。它默认10.0.26100.0且无法通过配置、环境变量修改。26100是win11的，在win10的安装器上根本看不到这个版本
@@ -267,7 +270,7 @@ symbol_level = 0
 -Wno-thread-safety-reference-return
 -Wno-c++11-narrowing-const-reference
 ```
-
+否则编译的时候会把这些警告当作错误而终止编译。
 
 由于我改低了SDK的版本（NTDDI_WIN11_GE是>=WIN 11，而我在win10的SDK上编译），编译时会提示
 ```
@@ -313,10 +316,138 @@ gn gen out.gn/x64.release
 ninja -C out.gn/x64.release v8_monolith
 ```
 
+* MD/MT
+默认编译出来的是`MT`方式，启动Visual Studio的命令行，执行`dumpbin /directives v8_monolith.lib | findstr /i RuntimeLibrary`
+如果输出`MT_StaticRelease`就是`MT`模式，`MD_DynamicRelease`则是`MD`
+
+在`build\config\win\BUILD.gn`中，可以看到这些参数的配置，这说明
+`is_component_build=true`是`MD`，`false`则为`MT`，而`is_debug`则控制是用`MDd`还是`MTd`。
+```
+config("release_crt") {
+  if (is_component_build) {
+    cflags = [ "/MD" ]
+
+    # /MD specifies msvcrt.lib as the CRT library, which is the dynamic+release
+    # version. Rust needs to agree, and its default mode is dynamic+release, so
+    # we do nothing here. See https://github.com/rust-lang/rust/issues/39016.
+
+    if (use_custom_libcxx) {
+      # On Windows, including libcpmt[d]/msvcprt[d] explicitly links the C++
+      # standard library, which libc++ needs for exception_ptr internals.
+      ldflags = [ "/DEFAULTLIB:msvcprt.lib" ]
+    }
+  } else {
+    cflags = [ "/MT" ]
+
+    # /MT specifies libcmt.lib as the CRT library, which is the static+release
+    # version. Rust needs to agree, so we tell it to use the static+release CRT
+    # as well. See https://github.com/rust-lang/rust/issues/39016.
+    rustflags = [ "-Ctarget-feature=+crt-static" ]
+
+    if (use_custom_libcxx) {
+      ldflags = [ "/DEFAULTLIB:libcpmt.lib" ]
+    }
+  }
+}
+
+config("dynamic_crt") {
+  if (is_debug) {
+    # This pulls in the DLL debug CRT and defines _DEBUG
+    cflags = [ "/MDd" ]
+
+    # /MDd specifies msvcrtd.lib as the CRT library. Rust needs to agree, so we
+    # specify it explicitly. Rust defaults to the dynamic+release library, which
+    # we remove here, and then replace. See
+    # https://github.com/rust-lang/rust/issues/39016.
+    rustflags = [
+      "-Clink-arg=/nodefaultlib:msvcrt.lib",
+      "-Clink-arg=msvcrtd.lib",
+    ]
+
+    if (use_custom_libcxx) {
+      ldflags = [ "/DEFAULTLIB:msvcprtd.lib" ]
+    }
+  } else {
+    cflags = [ "/MD" ]
+
+    # /MD specifies msvcrt.lib as the CRT library, which is the dynamic+release
+    # version. Rust needs to agree, and its default mode is dynamic+release, so
+    # we do nothing here. See https://github.com/rust-lang/rust/issues/39016.
+
+    if (use_custom_libcxx) {
+      ldflags = [ "/DEFAULTLIB:msvcprt.lib" ]
+    }
+  }
+}
+
+config("static_crt") {
+  if (is_debug) {
+    # This pulls in the static debug CRT and defines _DEBUG
+    cflags = [ "/MTd" ]
+
+    # /MTd specifies libcmtd.lib as the CRT library. Rust needs to agree, so we
+    # specify it explicitly. We tell Rust that we're using the static CRT but
+    # remove the release library that it chooses, and replace with the debug
+    # library. See https://github.com/rust-lang/rust/issues/39016.
+    rustflags = [
+      "-Ctarget-feature=+crt-static",
+      "-Clink-arg=/nodefaultlib:libcmt.lib",
+      "-Clink-arg=libcmtd.lib",
+    ]
+
+    if (use_custom_libcxx) {
+      ldflags = [ "/DEFAULTLIB:libcpmtd.lib" ]
+    }
+  } else {
+    cflags = [ "/MT" ]
+
+    # /MT specifies libcmt.lib as the CRT library, which is the static+release
+    # version. Rust needs to agree, so we tell it to use the static+release CRT
+    # as well. See https://github.com/rust-lang/rust/issues/39016.
+    rustflags = [ "-Ctarget-feature=+crt-static" ]
+
+    if (use_custom_libcxx) {
+      ldflags = [ "/DEFAULTLIB:libcpmt.lib" ]
+    }
+  }
+}
+```
+由于我需要用`MD`方式编译`v8_monolithic`，所以要设置`is_component_build=true`，但在`BUILD.gn`中，却又有一个断言要求启用`v8_monolithic`时就不能设置`is_component_build=true`
+```
+if (v8_monolithic) {
+  assert(!is_component_build,
+         "Set `is_component_build = false` for v8_monolithic.")
+```
+这下完蛋了，我的程序使用的上`MD`方式编译编译(这个我没有权限改)，所以只能手动改`build\config\win\BUILD.gn`同时保持`is_component_build=false`
+
+把`configs = [ ":static_crt" ]`注释掉，换成`configs = [ ":dynamic_crt" ]`即可
+```
+config("default_crt") {
+  if (is_component_build) {
+    # Component mode: dynamic CRT. Since the library is shared, it requires
+    # exceptions or will give errors about things not matching, so keep
+    # exceptions on.
+    configs = [ ":dynamic_crt" ]
+  } else {
+    if (current_os == "winuwp") {
+      # https://blogs.msdn.microsoft.com/vcblog/2014/06/10/the-great-c-runtime-crt-refactoring/
+      # contains a details explanation of what is happening with the Windows
+      # CRT in Visual Studio releases related to Windows store applications.
+      configs = [ ":dynamic_crt" ]
+    } else {
+      # Desktop Windows: static CRT.
+      # configs = [ ":static_crt" ]
+      configs = [ ":dynamic_crt" ]
+    }
+  }
+}
+```
+
 # 其他构建参考
 1. https://github.com/jeroen/build-v8-static/blob/master/rocky-8/Dockerfile
 2. nodejs的源码有个构建脚本：https://github.com/nodejs/node/blob/main/tools/make-v8.sh
 理论上这个比v8官方的构建系统更简单，并且它的源码里直接有third_party的文件，不需要gclent sync等
+3. https://github.com/phpv8/v8js/blob/php8/README.Win32.md
 ```
 # 下载nodejs lts源码包并解压
 cd node-24.14.1
